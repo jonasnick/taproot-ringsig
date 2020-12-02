@@ -2,7 +2,7 @@
 
 This is a proof of concept that creates a ring signature over all taproot outputs in the UTXO set. The inputs of the signing algorithm are the output of bitcoind's `dumptxoutset`, a message and  a secret key corresponding to at least one of the taproot outputs. It uses *Borromean Ring Signatures* as implemented in [libsecp256k1-zkp](https://github.com/ElementsProject/secp256k1-zkp/pull/110).
 
-It would be interesting to explore if this scheme can be more than a ["Bragging Rights Signature"](https://gist.github.com/AdamISZ/52aa2e4e48240dfbadebb316507d0749#bragging-rights-ring-signature). In any case, similar constructions can be used to implement Fidelity Bonds or [Stake Certificates](https://lists.linuxfoundation.org/pipermail/lightning-dev/2020-December/002898.html).
+It would be interesting to explore if this scheme can be more than a ["Bragging Rights Signature"](https://gist.github.com/AdamISZ/52aa2e4e48240dfbadebb316507d0749#bragging-rights-ring-signature). In any case, similar constructions can be used to implement Fidelity Bonds or [Stake Certificates](https://lists.linuxfoundation.org/pipermail/lightning-dev/2020-November/002884.html).
 
 ## Example
 
