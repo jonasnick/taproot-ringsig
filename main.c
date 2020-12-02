@@ -23,6 +23,12 @@ int read_utxo_metadata(uint64_t *coins_count, FILE *utxo_dump) {
     if (ret != size) {
         return 0;
     }
+    printf("\n");
+    printf("UTXO dump for block ");
+    for (size_t i = size; i > 0; i--) {
+        printf("%02x", buffer[i-1]);
+    }
+
     size = 8;
     ret = fread(buffer, 1, size, utxo_dump);
     if (ret != size) {
@@ -103,7 +109,8 @@ uint64_t DecompressAmount(uint64_t x)
 
 void help(char** argv) {
     printf("%s keygen\n", argv[0]);
-    printf("%s prove <dumputxo_file> <seckey>\n", argv[0]);
+    printf("%s sign <dumputxo_file> <msghash>\n", argv[0]);
+    printf("%s verify <dumputxo_file> <sig> <msghash>\n", argv[0]);
 }
 
 /* TODO: */
@@ -147,7 +154,7 @@ int read_utxos(secp256k1_context *ctx, secp256k1_pubkey *taproot_keys, size_t *n
         }
         /* print_coutpoint(buffer); */
 
-        uint32_t code = (uint32_t)read_varint(utxo_dump);
+        read_varint(utxo_dump);
         uint64_t amount = DecompressAmount(read_varint(utxo_dump));
         uint64_t nSize = read_varint(utxo_dump);
         static const unsigned int nSpecialScripts = 6;
@@ -164,18 +171,27 @@ int read_utxos(secp256k1_context *ctx, secp256k1_pubkey *taproot_keys, size_t *n
         if (ret != size) {
             return 0;
         }
-        if (size == 34 && buffer[0] == 0x51) {
+        if (size == 34 && buffer[0] == 0x51 && amount >= MIN_AMOUNT) {
             buffer[1] = 0x02;
-            printf("pubkey: ");
-            for (size_t j = 0; j < size; j++) {
-                printf("%02X", buffer[j]);
-            }
-            printf("\n");
             assert(*n_taproot_keys < MAX_KEYS);
             assert(secp256k1_ec_pubkey_parse(ctx, &taproot_keys[*n_taproot_keys], &buffer[1], 33));
             (*n_taproot_keys)++;
         }
     }
+    printf(" contains\n%lu unspent taproot outputs with more than %d sats:\n", *n_taproot_keys, MIN_AMOUNT);
+    printf("[");
+    for (size_t i = 0; i < *n_taproot_keys; i++) {
+        size_t output_len = 33;
+        assert(secp256k1_ec_pubkey_serialize(ctx, buffer, &output_len, &taproot_keys[i], SECP256K1_EC_COMPRESSED));
+        for (size_t j = 1; j < output_len; j++) {
+            printf("%02x", buffer[j]);
+        }
+        if (i != *n_taproot_keys - 1) {
+            printf(", ");
+        }
+    }
+    printf("]\n");
+
     return 1;
 }
 
@@ -201,19 +217,20 @@ int get_taproot_keys(secp256k1_context *ctx, secp256k1_pubkey *pubkeys, size_t *
     return 1;
 }
 
-int prove(int argc, char **argv) {
+int sign(int argc, char **argv) {
     secp256k1_pubkey pubkeys[MAX_KEYS];
     size_t n_pubkeys;
     secp256k1_pubkey my_pubkey;
     secp256k1_context *ctx;
 
-    if (argc < 3) {
+    if (argc < 4 || strlen(argv[3]) != 64) {
         help(argv);
         return 0;
     }
 
     ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
     if (!get_taproot_keys(ctx, pubkeys, &n_pubkeys, argv[2])) {
+        secp256k1_context_destroy(ctx);
         return 0;
     }
 
@@ -223,7 +240,7 @@ int prove(int argc, char **argv) {
         return 0;
     }
     size_t pos = SIZE_MAX;
-    for (int i = 0; i < n_pubkeys; i++) {
+    for (size_t i = 0; i < n_pubkeys; i++) {
         if (memcmp(&my_pubkey, &pubkeys[i], sizeof(my_pubkey)) == 0) {
             pos = i;
         }
@@ -233,22 +250,88 @@ int prove(int argc, char **argv) {
         secp256k1_context_destroy(ctx);
         return 0;
     }
-    printf("pos %lu\n", pos);
+
+    unsigned char msg[32];
+    for (size_t i = 0; i < 32; i++) {
+        if (sscanf(&argv[3][2*i], "%2hhx", &msg[i]) != 1) {
+            fprintf(stderr, "couldn't parse msg\n");
+            secp256k1_context_destroy(ctx);
+            return 0;
+        }
+    }
 
     secp256k1_scratch_space *scratch = secp256k1_scratch_space_create(ctx, 8 * 1024);
     unsigned char sig[1024];
     size_t sig_len = sizeof(sig);
-    unsigned char msg[32] = { 0 };
     if (!secp256k1_ring_sign(ctx, scratch, sig, &sig_len, NULL, pubkeys, n_pubkeys, seckey, pos, NULL, msg)) {
         fprintf(stderr, "signing failed\n");
         secp256k1_scratch_space_destroy(ctx, scratch);
         secp256k1_context_destroy(ctx);
         return 0;
     }
+    printf("\nSignature: \n");
     for (size_t i = 0; i < sig_len; i++) {
-        printf("%02X", sig[i]);
+        printf("%02x", sig[i]);
     }
     printf("\n");
+
+    secp256k1_scratch_space_destroy(ctx, scratch);
+    secp256k1_context_destroy(ctx);
+    return 1;
+}
+
+int verify(int argc, char **argv) {
+    secp256k1_pubkey pubkeys[MAX_KEYS];
+    size_t n_pubkeys;
+    secp256k1_context *ctx;
+    unsigned char sig[1024];
+
+    if (argc < 5 || strlen(argv[4]) != 64) {
+        help(argv);
+        return 0;
+    }
+
+    ctx = secp256k1_context_create(SECP256K1_CONTEXT_SIGN | SECP256K1_CONTEXT_VERIFY);
+    if (!get_taproot_keys(ctx, pubkeys, &n_pubkeys, argv[2])) {
+        secp256k1_context_destroy(ctx);
+        return 0;
+    }
+
+    size_t sig_len = strlen(argv[3])/2;
+    if (sig_len > sizeof(sig)) {
+        fprintf(stderr, "sig too long\n");
+        secp256k1_context_destroy(ctx);
+        return 0;
+    }
+
+    for (size_t i = 0; i < sig_len; i++) {
+        if (sscanf(&argv[3][2*i], "%2hhx", &sig[i]) != 1) {
+            fprintf(stderr, "couldn't parse sig\n");
+            secp256k1_context_destroy(ctx);
+            return 0;
+        }
+    }
+
+    unsigned char msg[32];
+    for (size_t i = 0; i < 32; i++) {
+        if (sscanf(&argv[4][2*i], "%2hhx", &msg[i]) != 1) {
+            fprintf(stderr, "couldn't parse msg\n");
+            secp256k1_context_destroy(ctx);
+            return 0;
+        }
+    }
+
+    printf("\n");
+    printf("Verifying ring signature for public keys and message...");
+    secp256k1_scratch_space *scratch = secp256k1_scratch_space_create(ctx, 8 * 1024);
+    if (!secp256k1_ring_verify(ctx, scratch, sig, sig_len, pubkeys, n_pubkeys, msg)) {
+        fprintf(stderr, "verification failed\n");
+        secp256k1_scratch_space_destroy(ctx, scratch);
+        secp256k1_context_destroy(ctx);
+        return 0;
+    }
+
+    printf("ok!\n");
 
     secp256k1_scratch_space_destroy(ctx, scratch);
     secp256k1_context_destroy(ctx);
@@ -263,8 +346,10 @@ int main(int argc, char** argv) {
 
     if (strcmp(argv[1], "keygen") == 0) {
         return !keygen();
-    } else if (strcmp(argv[1], "prove") == 0){
-        return !prove(argc, argv);
+    } else if (strcmp(argv[1], "sign") == 0){
+        return !sign(argc, argv);
+    } else if (strcmp(argv[1], "verify") == 0){
+        return !verify(argc, argv);
     } else {
         help(argv);
         return 1;
